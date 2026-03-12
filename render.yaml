@@ -1,7 +1,7 @@
 services:
   - type: web
     name: sgos-backend
-    runtime: node
+    env: node
     plan: free
     region: oregon
     buildCommand: npm ci
