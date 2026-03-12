@@ -11,7 +11,7 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
 const PORT = Number(process.env.PORT || 3000);
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
