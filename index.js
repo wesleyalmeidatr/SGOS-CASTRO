@@ -691,6 +691,40 @@ app.delete('/users/:id', authenticateJWT, requireAdmin, async (req, res) => {
 
 app.get('/os', authenticateJWT, requireElevated, async (req, res) => {
     try {
+        const hasExplicitPagination = req.query?.page !== undefined || req.query?.limit !== undefined;
+
+        if (!hasExplicitPagination) {
+            const pageSize = 500;
+            let offset = 0;
+            const allOrdens = [];
+
+            while (true) {
+                const { data, error } = await adminClient
+                    .from('ordens_servico')
+                    .select('*')
+                    .order('data_abertura', { ascending: false })
+                    .range(offset, offset + pageSize - 1);
+
+                if (error) return res.status(500).json({ error: error.message });
+
+                const chunk = data || [];
+                if (!chunk.length) break;
+
+                allOrdens.push(...chunk);
+
+                if (chunk.length < pageSize) break;
+                offset += pageSize;
+            }
+
+            return res.json({
+                ordens: allOrdens,
+                page: 1,
+                limit: allOrdens.length,
+                hasMore: false,
+                nextPage: null
+            });
+        }
+
         const page = clampInt(req.query?.page, 1, 100000, 1);
         const limit = clampInt(req.query?.limit, 1, 500, 200);
         const from = (page - 1) * limit;
