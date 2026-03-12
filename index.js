@@ -2,9 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
 const PORT = Number(process.env.PORT || 3000);
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
@@ -42,7 +46,18 @@ app.use(cors({
         return callback(new Error('Origem nao permitida pelo CORS'));
     }
 }));
+app.use(helmet());
 app.use(express.json({ limit: '30mb' }));
+
+const loginLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+        error: 'Muitas tentativas de login. Aguarde alguns minutos e tente novamente.'
+    }
+});
 
 const publicClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false }
@@ -436,7 +451,7 @@ app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'sgos-backend' });
 });
 
-app.post('/login', async (req, res) => {
+app.post('/login', loginLimiter, async (req, res) => {
     try {
         const email = sanitizeString(req.body?.email).toLowerCase();
         const password = String(req.body?.password || '');
@@ -1003,6 +1018,17 @@ app.post('/importar/os', authenticateJWT, requireElevated, async (req, res) => {
         console.error('Erro em POST /importar/os:', error);
         return res.status(500).json({ error: 'Falha ao importar OS em lote' });
     }
+});
+
+app.use((err, _req, res, next) => {
+    if (!err) return next();
+
+    if (String(err.message || '').includes('Origem nao permitida pelo CORS')) {
+        return res.status(403).json({ error: 'Origem nao permitida' });
+    }
+
+    console.error('Erro nao tratado:', err);
+    return res.status(500).json({ error: 'Falha interna do servidor' });
 });
 
 app.listen(PORT, () => {
