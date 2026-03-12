@@ -134,6 +134,11 @@ function parsePositiveInt(value, fallback = 1) {
     return Math.floor(n);
 }
 
+function clampInt(value, min, max, fallback) {
+    const parsed = parsePositiveInt(value, fallback);
+    return Math.min(max, Math.max(min, parsed));
+}
+
 function parseItemId(value) {
     const raw = String(value || '').trim();
     if (!raw) return null;
@@ -375,6 +380,85 @@ async function scanInventoryByCode(normalizedSearch) {
     }
 }
 
+function escapeLikeValue(value) {
+    return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function buildInventorySearchVariants(rawCode, normalizedCode) {
+    const cleaned = String(rawCode || '')
+        .replace(/^=\(\s*"/, '')
+        .replace(/"\s*\)$/, '')
+        .trim();
+
+    const compact = cleaned.replace(/\s+/g, '');
+    const normalized = normalizeCode(cleaned);
+
+    return Array.from(new Set([
+        cleaned,
+        cleaned.toUpperCase(),
+        compact,
+        normalizedCode,
+        normalized
+    ].filter(Boolean)));
+}
+
+async function findInventoryItemViaDb(rawCode, normalizedCode) {
+    const variants = buildInventorySearchVariants(rawCode, normalizedCode);
+    if (!variants.length) return null;
+
+    const codeField = await resolveColumn('inventario', [' Código do produto', 'Código do produto']);
+
+    for (const variant of variants) {
+        const { data, error } = await adminClient
+            .from('inventario')
+            .select('*')
+            .eq(codeField, variant)
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            if (isMissingColumnError(error)) return null;
+            throw error;
+        }
+
+        if (data) return data;
+    }
+
+    for (const variant of variants) {
+        const prefixPattern = `${escapeLikeValue(variant)}%`;
+        const { data, error } = await adminClient
+            .from('inventario')
+            .select('*')
+            .ilike(codeField, prefixPattern)
+            .limit(1);
+
+        if (error) {
+            if (isMissingColumnError(error)) return null;
+            throw error;
+        }
+
+        if (data?.length) return data[0];
+    }
+
+    for (const variant of variants) {
+        const containsPattern = `%${escapeLikeValue(variant)}%`;
+        const { data, error } = await adminClient
+            .from('inventario')
+            .select('*')
+            .ilike(codeField, containsPattern)
+            .limit(1);
+
+        if (error) {
+            if (isMissingColumnError(error)) return null;
+            throw error;
+        }
+
+        if (data?.length) return data[0];
+    }
+
+    return null;
+}
+
 async function getRoleFromProfiles(userId) {
     const idColumns = ['id', 'user_id', 'uuid'];
 
@@ -605,16 +689,31 @@ app.delete('/users/:id', authenticateJWT, requireAdmin, async (req, res) => {
     }
 });
 
-app.get('/os', authenticateJWT, requireElevated, async (_req, res) => {
+app.get('/os', authenticateJWT, requireElevated, async (req, res) => {
     try {
+        const page = clampInt(req.query?.page, 1, 100000, 1);
+        const limit = clampInt(req.query?.limit, 1, 500, 200);
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+
         const { data, error } = await adminClient
             .from('ordens_servico')
             .select('*')
-            .order('data_abertura', { ascending: false });
+            .order('data_abertura', { ascending: false })
+            .range(from, to);
 
         if (error) return res.status(500).json({ error: error.message });
 
-        return res.json({ ordens: data || [] });
+        const ordens = data || [];
+        const hasMore = ordens.length === limit;
+
+        return res.json({
+            ordens,
+            page,
+            limit,
+            hasMore,
+            nextPage: hasMore ? page + 1 : null
+        });
     } catch (error) {
         console.error('Erro em GET /os:', error);
         return res.status(500).json({ error: 'Falha ao listar ordens' });
@@ -805,7 +904,7 @@ app.delete('/os/:numero/items/:id', authenticateJWT, requireElevated, async (req
 
 app.get('/item', authenticateJWT, requireElevated, async (req, res) => {
     try {
-        const codigo = sanitizeString(req.query?.codigo || '').toUpperCase();
+        const codigo = sanitizeString(req.query?.codigo || '');
         if (!codigo) {
             return res.status(400).json({ error: 'Codigo ausente' });
         }
@@ -815,12 +914,16 @@ app.get('/item', authenticateJWT, requireElevated, async (req, res) => {
             return res.status(400).json({ error: 'Codigo invalido' });
         }
 
-        let cache = await loadInventoryCache();
-        let foundItem = findInventoryItem(cache.entries, cache.exactMap, normalizedSearch);
+        let foundItem = await findInventoryItemViaDb(codigo, normalizedSearch);
 
         if (!foundItem) {
-            cache = await loadInventoryCache({ forceRefresh: true });
+            let cache = await loadInventoryCache();
             foundItem = findInventoryItem(cache.entries, cache.exactMap, normalizedSearch);
+
+            if (!foundItem) {
+                cache = await loadInventoryCache({ forceRefresh: true });
+                foundItem = findInventoryItem(cache.entries, cache.exactMap, normalizedSearch);
+            }
         }
 
         if (!foundItem) {
